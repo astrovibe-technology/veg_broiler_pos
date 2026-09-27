@@ -59,7 +59,7 @@ def create_user(
     # Validate role
     # -----------------------------------------------------
 
-    if request.role not in ["admin", "manager"]:
+    if request.role not in ["admin", "manager","superadmin"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Role must be either admin or manager"
@@ -237,5 +237,48 @@ def login(
             "shop_id": user.shop_id,
             "is_active": user.is_active
         }
+    }
+
+
+
+# =========================================================
+# GET ALL USERS
+# =========================================================
+
+@router.get("/")
+def get_all_users(
+    db: Session = Depends(get_db)
+):
+
+    # -----------------------------------------------------
+    # Get all users
+    # -----------------------------------------------------
+
+    users = (
+        db.query(User)
+        .order_by(User.id.desc())
+        .all()
+    )
+
+    # -----------------------------------------------------
+    # Response
+    # -----------------------------------------------------
+
+    return {
+        "message": "Users fetched successfully",
+        "count": len(users),
+        "users": [
+            {
+                "id": user.id,
+                "name": user.name,
+                "username": user.username,
+                "email": user.email,
+                "phone": user.phone,
+                "role": user.role,
+                "shop_id": user.shop_id,
+                "is_active": user.is_active
+            }
+            for user in users
+        ]
     }
 

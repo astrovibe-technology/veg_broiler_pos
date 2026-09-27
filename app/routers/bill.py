@@ -1,8 +1,12 @@
 from decimal import Decimal
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from sqlalchemy import func
+
 from database import get_db
+
 from models.sale import Sale
 from models.sale_item import SaleItem
 from models.product import Product
@@ -42,6 +46,125 @@ class BillingCreate(BaseModel):
 
 
 # ============================================================
+# BILL PREFIX
+# ============================================================
+
+def generate_bill_prefix(shop: Shop):
+
+    shop_name = (shop.name or "").strip()
+
+    if not shop_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Shop name is required for bill number generation"
+        )
+
+    shop_name_lower = shop_name.lower()
+
+    if "vegetable" in shop_name_lower:
+        type_code = "V"
+
+    elif "broiler" in shop_name_lower:
+        type_code = "B"
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Shop name must contain either "
+                "'Vegetable' or 'Broiler'"
+            )
+        )
+
+    address = (shop.address or "").strip()
+
+    if not address:
+        raise HTTPException(
+            status_code=400,
+            detail="Shop address is required for bill number generation"
+        )
+
+    address_code = address[0].upper()
+
+    return f"HB{type_code}{address_code}"
+
+
+# ============================================================
+# GET NEXT BILL NUMBER
+# ============================================================
+
+@router.get(
+    "/next-bill-number",
+    status_code=status.HTTP_200_OK
+)
+def get_next_bill_number(
+    shop_id: int,
+    db: Session = Depends(get_db)
+):
+
+    # Check shop
+    shop = (
+        db.query(Shop)
+        .filter(
+            Shop.id == shop_id
+        )
+        .first()
+    )
+
+    if not shop:
+        raise HTTPException(
+            status_code=404,
+            detail="Shop not found"
+        )
+
+    # Generate prefix
+    bill_prefix = generate_bill_prefix(shop)
+
+    # Today's date
+    today = func.current_date()
+
+    # Get today's last bill
+    last_sale = (
+        db.query(Sale)
+        .filter(
+            Sale.shop_id == shop_id,
+            func.date(Sale.created_at) == today
+        )
+        .order_by(
+            Sale.id.desc()
+        )
+        .first()
+    )
+
+    # Generate next number
+    if last_sale:
+
+        try:
+            last_number = int(
+                last_sale.bill_no.split("-")[-1]
+            )
+
+        except (ValueError, AttributeError):
+            last_number = 0
+
+        next_number = last_number + 1
+
+    else:
+        next_number = 1
+
+    # Final bill number
+    next_bill_number = (
+        f"{bill_prefix}-{next_number:03d}"
+    )
+
+    return {
+        "shop_id": shop_id,
+        "bill_prefix": bill_prefix,
+        "next_bill_number": next_bill_number
+    }
+
+
+# ============================================================
 # CREATE BILL
 # ============================================================
 
@@ -53,13 +176,18 @@ def create_bill(
     data: BillingCreate,
     db: Session = Depends(get_db)
 ):
+
     # --------------------------------------------------------
     # 1. Validate shop
     # --------------------------------------------------------
 
-    shop = db.query(Shop).filter(
-        Shop.id == data.shop_id
-    ).first()
+    shop = (
+        db.query(Shop)
+        .filter(
+            Shop.id == data.shop_id
+        )
+        .first()
+    )
 
     if not shop:
         raise HTTPException(
@@ -95,10 +223,13 @@ def create_bill(
         )
 
     # --------------------------------------------------------
-    # 4. Prevent duplicate product IDs
+    # 4. Prevent duplicate products
     # --------------------------------------------------------
 
-    product_ids = [item.product_id for item in data.items]
+    product_ids = [
+        item.product_id
+        for item in data.items
+    ]
 
     if len(product_ids) != len(set(product_ids)):
         raise HTTPException(
@@ -116,14 +247,15 @@ def create_bill(
 
     for item in data.items:
 
-        # ----------------------------------------------------
-        # Check product is assigned to this shop
-        # ----------------------------------------------------
-
-        product_shop = db.query(ProductShop).filter(
-            ProductShop.product_id == item.product_id,
-            ProductShop.shop_id == data.shop_id
-        ).first()
+        # Check product assigned to shop
+        product_shop = (
+            db.query(ProductShop)
+            .filter(
+                ProductShop.product_id == item.product_id,
+                ProductShop.shop_id == data.shop_id
+            )
+            .first()
+        )
 
         if not product_shop:
             raise HTTPException(
@@ -134,14 +266,15 @@ def create_bill(
                 )
             )
 
-        # ----------------------------------------------------
         # Get product
-        # ----------------------------------------------------
-
-        product = db.query(Product).filter(
-            Product.id == item.product_id,
-            Product.is_active == True
-        ).first()
+        product = (
+            db.query(Product)
+            .filter(
+                Product.id == item.product_id,
+                Product.is_active == True
+            )
+            .first()
+        )
 
         if not product:
             raise HTTPException(
@@ -149,15 +282,16 @@ def create_bill(
                 detail=f"Product {item.product_id} not found"
             )
 
-        # ----------------------------------------------------
         # Calculate item total
-        # ----------------------------------------------------
-
-        unit_price = Decimal(str(product.price))
+        unit_price = Decimal(
+            str(product.price)
+        )
 
         total_price = (
             unit_price * item.quantity
-        ).quantize(Decimal("0.01"))
+        ).quantize(
+            Decimal("0.01")
+        )
 
         subtotal += total_price
 
@@ -186,22 +320,22 @@ def create_bill(
 
     grand_total = (
         subtotal - discount
-    ).quantize(Decimal("0.01"))
+    ).quantize(
+        Decimal("0.01")
+    )
 
     # --------------------------------------------------------
     # 8. Get billing user
     # --------------------------------------------------------
-    #
-    # For now this example uses the first active user of the
-    # shop.
-    #
-    # Later, replace this with your JWT logged-in user.
-    #
 
-    created_by = db.query(User).filter(
-        User.shop_id == data.shop_id,
-        User.is_active == True
-    ).first()
+    created_by = (
+        db.query(User)
+        .filter(
+            User.shop_id == data.shop_id,
+            User.is_active == True
+        )
+        .first()
+    )
 
     if not created_by:
         raise HTTPException(
@@ -210,24 +344,62 @@ def create_bill(
         )
 
     # --------------------------------------------------------
-    # 9. Generate bill number
+    # 9. Generate bill prefix
     # --------------------------------------------------------
 
-    last_sale = db.query(Sale).filter(
-        Sale.shop_id == data.shop_id
-    ).order_by(
-        Sale.id.desc()
-    ).first()
+    bill_prefix = generate_bill_prefix(shop)
+
+    # --------------------------------------------------------
+    # 10. Get today's date
+    # --------------------------------------------------------
+
+    today = func.current_date()
+
+    # --------------------------------------------------------
+    # 11. Get today's last bill
+    # --------------------------------------------------------
+
+    last_sale = (
+        db.query(Sale)
+        .filter(
+            Sale.shop_id == data.shop_id,
+            func.date(Sale.created_at) == today
+        )
+        .order_by(
+            Sale.id.desc()
+        )
+        .first()
+    )
+
+    # --------------------------------------------------------
+    # 12. Generate daily number
+    # --------------------------------------------------------
 
     if last_sale:
-        next_number = last_sale.id + 1
+
+        try:
+            last_number = int(
+                last_sale.bill_no.split("-")[-1]
+            )
+
+        except (ValueError, AttributeError):
+            last_number = 0
+
+        next_number = last_number + 1
+
     else:
         next_number = 1
 
-    bill_no = f"INV-{data.shop_id}-{next_number:05d}"
+    # --------------------------------------------------------
+    # 13. Generate bill number
+    # --------------------------------------------------------
+
+    bill_no = (
+        f"{bill_prefix}-{next_number:03d}"
+    )
 
     # --------------------------------------------------------
-    # 10. Create Sale
+    # 14. Create Sale
     # --------------------------------------------------------
 
     sale = Sale(
@@ -245,11 +417,10 @@ def create_bill(
 
     db.add(sale)
 
-    # Flush so sale.id is available
     db.flush()
 
     # --------------------------------------------------------
-    # 11. Create Sale Items
+    # 15. Create Sale Items
     # --------------------------------------------------------
 
     for item_data in sale_items_data:
@@ -265,16 +436,15 @@ def create_bill(
         db.add(sale_item)
 
     # --------------------------------------------------------
-    # 12. Commit everything
+    # 16. Commit
     # --------------------------------------------------------
 
     db.commit()
 
-    # Refresh sale
     db.refresh(sale)
 
     # --------------------------------------------------------
-    # 13. Response
+    # 17. Response
     # --------------------------------------------------------
 
     return {
@@ -291,4 +461,3 @@ def create_bill(
         "status": sale.status,
         "created_by": sale.created_by
     }
-
